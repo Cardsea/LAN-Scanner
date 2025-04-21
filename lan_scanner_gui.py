@@ -2,24 +2,16 @@ import sys
 import subprocess
 import socket
 import json
-import signal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QTextEdit, QLabel, QTableWidget, QTableWidgetItem, QHBoxLayout, QLineEdit,
-    QMessageBox, QDialog, QComboBox, QGridLayout
+    QMessageBox, QDialog, QComboBox, QGridLayout, QStackedWidget
 )
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QThread, pyqtSignal
 
-DEFAULT_COMMAND = "sudo -n arp-scan --interface=en0 10.0.20.0/24"
-
-def signal_handler(sig, frame):
-    print("\nbye! thanks for using my LAN Scanner!")
-    print("if you liked it, please give it a star on github!")
-    print("https://github.com/Cardsea/LAN-Scanner")
-    print("if you have any suggestions, please open an issue!")
-    print("https://github.com/Cardsea/LAN-Scanner/issues")
-    sys.exit(0)
+DEFAULT_COMMAND = "sudo -v && sudo arp-scan --interface=en0 10.0.20.0/24"
+DEFAULT_BT_COMMAND = "bluetoothctl scan on"
 
 class ActionWorker(QThread):
     finished = pyqtSignal(str)
@@ -54,9 +46,10 @@ class ActionWorker(QThread):
             self.error.emit(str(e))
 
 class MACLookupWindow(QDialog):
-    def __init__(self, mac, parent=None):
+    def __init__(self, mac, vendor, parent=None):
         super().__init__(parent)
         self.mac = mac
+        self.vendor = vendor
         self.worker = None
         self.setWindowTitle(f"MAC Lookup - {mac}")
         self.setGeometry(400, 400, 500, 400)
@@ -66,9 +59,15 @@ class MACLookupWindow(QDialog):
         layout = QVBoxLayout()
 
         # MAC Info
-        info_label = QLabel(f"🔍 Analyzing MAC: {self.mac}")
+        info_label = QLabel(f"Analyzing MAC: {self.mac}")
         info_label.setFont(QFont("Courier", 12, QFont.Bold))
         layout.addWidget(info_label)
+
+        # Show known vendor info
+        if self.vendor and self.vendor != "(Unknown)":
+            vendor_label = QLabel(f"Known Vendor: {self.vendor}")
+            vendor_label.setFont(QFont("Courier", 10))
+            layout.addWidget(vendor_label)
 
         # Lookup Options
         options_label = QLabel("Lookup Options:")
@@ -115,7 +114,17 @@ class MACLookupWindow(QDialog):
         self.lookup_btn.setEnabled(False)
         self.lookup_btn.setText("Looking up...")
         
-        self.worker = ActionWorker("mac_lookup", self.mac)
+        # Different API endpoints for different lookup types
+        if lookup_type == "Vendor Info":
+            url = f"https://api.macvendors.com/{self.mac}"
+        elif lookup_type == "Network Type":
+            url = f"https://api.macvendors.com/{self.mac}/network"
+        elif lookup_type == "Device Type":
+            url = f"https://api.macvendors.com/{self.mac}/device"
+        else:  # Full Details
+            url = f"https://api.macvendors.com/{self.mac}/full"
+            
+        self.worker = ActionWorker("mac_lookup", url)
         self.worker.finished.connect(self.handle_result)
         self.worker.error.connect(self.handle_error)
         self.worker.start()
@@ -123,16 +132,31 @@ class MACLookupWindow(QDialog):
     def handle_result(self, result):
         try:
             data = json.loads(result)
-            if "errors" in data:
-                self.output.append("❌ MAC Address not found in database")
+            if "errors" in data or result == "Not Found":
+                self.output.append("❌ MAC Address not found in online database")
+                if self.vendor and self.vendor != "(Unknown)":
+                    self.output.append(f"💡 But we know it's from: {self.vendor}")
                 self.output.append("💡 Try checking these instead:")
                 self.output.append("  • Check if MAC is valid")
                 self.output.append("  • Try a different lookup service")
                 self.output.append("  • Device might be too new/unknown")
             else:
-                self.output.append(f"✅ Found vendor info:\n{result}")
+                lookup_type = self.lookup_type.currentText()
+                if lookup_type == "Vendor Info":
+                    self.output.append(f"✅ Vendor Info:\n{data.get('vendor', self.vendor or 'Unknown')}")
+                elif lookup_type == "Network Type":
+                    self.output.append(f"✅ Network Type:\n{data.get('network_type', 'Unknown')}")
+                elif lookup_type == "Device Type":
+                    self.output.append(f"✅ Device Type:\n{data.get('device_type', 'Unknown')}")
+                else:  # Full Details
+                    self.output.append("✅ Full Device Details:")
+                    for key, value in data.items():
+                        self.output.append(f"  • {key}: {value}")
         except json.JSONDecodeError:
-            self.output.append(f"✅ Found vendor info:\n{result}")
+            if result == "Not Found" and self.vendor and self.vendor != "(Unknown)":
+                self.output.append(f"✅ Known Vendor: {self.vendor}")
+            else:
+                self.output.append(f"✅ Raw Response:\n{result}")
         
         self.lookup_btn.setEnabled(True)
         self.lookup_btn.setText("🔎 Lookup")
@@ -143,11 +167,23 @@ class MACLookupWindow(QDialog):
         self.lookup_btn.setEnabled(True)
         self.lookup_btn.setText("🔎 Lookup")
 
+    def show_diagnostics(self, row, col):
+        ip = self.output_table.item(row, 0).text()
+        mac = self.output_table.item(row, 1).text()
+        vendor = self.output_table.item(row, 2).text()
+        dialog = DiagnosticWindow(ip, mac, vendor, self)
+        dialog.exec_()
+
+    def lookup_mac(self):
+        dialog = MACLookupWindow(self.mac, self.vendor, self)
+        dialog.exec_()
+
 class DiagnosticWindow(QDialog):
-    def __init__(self, ip, mac, parent=None):
+    def __init__(self, ip, mac, vendor, parent=None):
         super().__init__(parent)
         self.ip = ip
         self.mac = mac
+        self.vendor = vendor
         self.worker = None
         self.setWindowTitle(f"Network Diagnostics - {ip}")
         self.setGeometry(400, 400, 600, 400)
@@ -208,7 +244,7 @@ class DiagnosticWindow(QDialog):
         self.ping_btn.setText("🔍 Ping Host")
 
     def lookup_mac(self):
-        dialog = MACLookupWindow(self.mac, self)
+        dialog = MACLookupWindow(self.mac, self.vendor, self)
         dialog.exec_()
 
     def test_connection(self):
@@ -235,6 +271,13 @@ class DiagnosticWindow(QDialog):
         self.connect_btn.setEnabled(True)
         self.connect_btn.setText("🔌 Test Connection (Port 80)")
 
+    def show_diagnostics(self, row, col):
+        ip = self.output_table.item(row, 0).text()
+        mac = self.output_table.item(row, 1).text()
+        vendor = self.output_table.item(row, 2).text()
+        dialog = DiagnosticWindow(ip, mac, vendor, self)
+        dialog.exec_()
+
 class ScanWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -252,7 +295,7 @@ class ScanWorker(QThread):
         except subprocess.CalledProcessError as e:
             error_msg = str(e.output)
             if "sudo: a password is required" in error_msg:
-                error_msg = "⚠️ Sudo password required! Try running 'sudo arp-scan' in terminal first to cache your password."
+                error_msg = "Sudo password required! Try running 'sudo arp-scan' in terminal first to cache your password."
             print(f"Error occurred: {error_msg}")
             self.error.emit(error_msg)
         except Exception as e:
@@ -265,8 +308,9 @@ class LANScanner(QWidget):
         self.setWindowTitle("LAN Scanner - Hacker Mode 🐾")
         self.setGeometry(300, 300, 800, 600)
         self.scan_worker = None
+        self.known_devices = set()  # Track known devices
         self.init_ui()
-
+        
     def init_ui(self):
         layout = QVBoxLayout()
 
@@ -346,6 +390,31 @@ class LANScanner(QWidget):
                 ip = parts[0]
                 mac = parts[1]
                 vendor = parts[2] if len(parts) > 2 else "(Unknown)"
+                
+                # Only mark as suspicious if it's a new device with an unknown vendor
+                if mac not in self.known_devices and vendor == "(Unknown)":
+                    self.known_devices.add(mac)
+                    self.status_text.append(f"WARNING: New unknown device detected: {mac}")
+                    
+                    # Create custom buttons
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle("New Device Detected")
+                    msg.setText(f"WARNING: A new unknown device was found:\n\nMAC: {mac}\nIP: {ip}\nVendor: {vendor}")
+                    
+                    # Add custom buttons
+                    diagnostics_btn = msg.addButton("🔍 Run Diagnostics", QMessageBox.ActionRole)
+                    block_btn = msg.addButton("🚫 Block Device", QMessageBox.ActionRole)
+                    ignore_btn = msg.addButton("✅ Ignore", QMessageBox.ActionRole)
+                    
+                    msg.exec_()
+                    
+                    # Handle button clicks
+                    if msg.clickedButton() == diagnostics_btn:
+                        dialog = DiagnosticWindow(ip, mac, vendor, self)
+                        dialog.exec_()
+                    elif msg.clickedButton() == block_btn:
+                        self.status_text.append(f"🚫 Device {mac} marked for blocking (manual block required via router)")
+                
                 row_pos = self.output_table.rowCount()
                 self.output_table.insertRow(row_pos)
                 self.output_table.setItem(row_pos, 0, QTableWidgetItem(ip))
@@ -355,12 +424,186 @@ class LANScanner(QWidget):
     def show_diagnostics(self, row, col):
         ip = self.output_table.item(row, 0).text()
         mac = self.output_table.item(row, 1).text()
-        dialog = DiagnosticWindow(ip, mac, self)
+        vendor = self.output_table.item(row, 2).text()
+        dialog = DiagnosticWindow(ip, mac, vendor, self)
         dialog.exec_()
 
+class BluetoothScanWorker(QThread):
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, command):
+        super().__init__()
+        self.command = command
+        
+    def run(self):
+        try:
+            print(f"Running Bluetooth command: {self.command}")
+            result = subprocess.check_output(self.command, shell=True, stderr=subprocess.STDOUT, text=True)
+            print(f"Got Bluetooth result: {result[:100]}...")
+            self.finished.emit(result)
+        except subprocess.CalledProcessError as e:
+            error_msg = str(e.output)
+            print(f"Bluetooth error occurred: {error_msg}")
+            self.error.emit(error_msg)
+        except Exception as e:
+            print(f"Unexpected Bluetooth error: {e}")
+            self.error.emit(str(e))
+
+class BluetoothScanner(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.scan_worker = None
+        self.known_devices = set()
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        self.command_label = QLabel("Bluetooth Scan Command:")
+        layout.addWidget(self.command_label)
+
+        self.command_input = QLineEdit()
+        self.command_input.setText(DEFAULT_BT_COMMAND)
+        self.command_input.setFont(QFont("Courier", 10))
+        layout.addWidget(self.command_input)
+
+        button_layout = QHBoxLayout()
+        self.run_button = QPushButton("Start Bluetooth Scan")
+        self.reset_button = QPushButton("Reset to Default")
+        button_layout.addWidget(self.run_button)
+        button_layout.addWidget(self.reset_button)
+        layout.addLayout(button_layout)
+
+        self.output_table = QTableWidget()
+        self.output_table.setColumnCount(3)
+        self.output_table.setHorizontalHeaderLabels(["Device Name", "MAC Address", "Signal Strength"])
+        self.output_table.cellClicked.connect(self.show_diagnostics)
+        layout.addWidget(self.output_table)
+
+        self.status_text = QTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setFont(QFont("Courier", 10))
+        layout.addWidget(self.status_text)
+
+        self.run_button.clicked.connect(self.run_scan)
+        self.reset_button.clicked.connect(self.reset_command)
+
+        self.setLayout(layout)
+
+    def reset_command(self):
+        self.command_input.setText(DEFAULT_BT_COMMAND)
+        self.status_text.append("Reset to default Bluetooth command.")
+
+    def run_scan(self):
+        if self.scan_worker and self.scan_worker.isRunning():
+            self.status_text.append("A Bluetooth scan is already running!")
+            return
+            
+        command = self.command_input.text().strip()
+        self.status_text.append(f"Running Bluetooth scan: {command}")
+        self.run_button.setEnabled(False)
+        self.run_button.setText("Scanning...")
+        
+        self.scan_worker = BluetoothScanWorker(command)
+        self.scan_worker.finished.connect(self.scan_complete)
+        self.scan_worker.error.connect(self.scan_error)
+        self.scan_worker.start()
+
+    def scan_complete(self, result):
+        self.status_text.append("Bluetooth scan complete.\n")
+        self.parse_output(result)
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Start Bluetooth Scan")
+        
+    def scan_error(self, error_msg):
+        self.status_text.append(f"Error:\n{error_msg}")
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Start Bluetooth Scan")
+
+    def parse_output(self, output):
+        print(f"Parsing Bluetooth output: {output[:100]}...")
+        self.output_table.setRowCount(0)
+        lines = output.splitlines()
+        for line in lines:
+            if "Device" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    mac = parts[1]
+                    name = " ".join(parts[2:]) if len(parts) > 2 else "(Unknown)"
+                    signal = "N/A"  # We'll need to parse this from the output
+                    
+                    if mac not in self.known_devices:
+                        self.known_devices.add(mac)
+                        self.status_text.append(f"WARNING: New Bluetooth device detected: {name} ({mac})")
+                        
+                        msg = QMessageBox(self)
+                        msg.setWindowTitle("New Bluetooth Device Detected")
+                        msg.setText(f"WARNING: A new Bluetooth device was found:\n\nName: {name}\nMAC: {mac}")
+                        
+                        diagnostics_btn = msg.addButton("Run Diagnostics", QMessageBox.ActionRole)
+                        block_btn = msg.addButton("Block Device", QMessageBox.ActionRole)
+                        ignore_btn = msg.addButton("Ignore", QMessageBox.ActionRole)
+                        
+                        msg.exec_()
+                        
+                        if msg.clickedButton() == block_btn:
+                            self.status_text.append(f"Device {mac} marked for blocking")
+                    
+                    row_pos = self.output_table.rowCount()
+                    self.output_table.insertRow(row_pos)
+                    self.output_table.setItem(row_pos, 0, QTableWidgetItem(name))
+                    self.output_table.setItem(row_pos, 1, QTableWidgetItem(mac))
+                    self.output_table.setItem(row_pos, 2, QTableWidgetItem(signal))
+
+    def show_diagnostics(self, row, col):
+        name = self.output_table.item(row, 0).text()
+        mac = self.output_table.item(row, 1).text()
+        dialog = DiagnosticWindow("N/A", mac, name, self)
+        dialog.exec_()
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Network Scanner - Hacker Mode 🐾")
+        self.setGeometry(300, 300, 800, 600)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Mode switcher
+        mode_layout = QHBoxLayout()
+        self.wifi_btn = QPushButton("WiFi Mode")
+        self.bluetooth_btn = QPushButton("Bluetooth Mode")
+        self.wifi_btn.setCheckable(True)
+        self.bluetooth_btn.setCheckable(True)
+        self.wifi_btn.setChecked(True)
+        mode_layout.addWidget(self.wifi_btn)
+        mode_layout.addWidget(self.bluetooth_btn)
+        layout.addLayout(mode_layout)
+        
+        # Stacked widget for switching between modes
+        self.stacked_widget = QStackedWidget()
+        self.wifi_scanner = LANScanner()
+        self.bluetooth_scanner = BluetoothScanner()
+        self.stacked_widget.addWidget(self.wifi_scanner)
+        self.stacked_widget.addWidget(self.bluetooth_scanner)
+        layout.addWidget(self.stacked_widget)
+        
+        # Connect mode buttons
+        self.wifi_btn.clicked.connect(lambda: self.switch_mode(0))
+        self.bluetooth_btn.clicked.connect(lambda: self.switch_mode(1))
+        
+        self.setLayout(layout)
+    
+    def switch_mode(self, index):
+        self.stacked_widget.setCurrentIndex(index)
+        self.wifi_btn.setChecked(index == 0)
+        self.bluetooth_btn.setChecked(index == 1)
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
     app = QApplication(sys.argv)
-    window = LANScanner()
+    window = MainWindow()
     window.show()
     sys.exit(app.exec_())
