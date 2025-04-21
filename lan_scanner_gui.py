@@ -2,6 +2,7 @@ import sys
 import subprocess
 import socket
 import json
+import signal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QTextEdit, QLabel, QTableWidget, QTableWidgetItem, QHBoxLayout, QLineEdit,
@@ -11,6 +12,14 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QThread, pyqtSignal
 
 DEFAULT_COMMAND = "sudo -n arp-scan --interface=en0 10.0.20.0/24"
+
+def signal_handler(sig, frame):
+    print("\nbye! thanks for using my LAN Scanner!")
+    print("if you liked it, please give it a star on github!")
+    print("https://github.com/Cardsea/LAN-Scanner")
+    print("if you have any suggestions, please open an issue!")
+    print("https://github.com/Cardsea/LAN-Scanner/issues")
+    sys.exit(0)
 
 class ActionWorker(QThread):
     finished = pyqtSignal(str)
@@ -350,15 +359,8 @@ class LANScanner(QWidget):
         dialog.exec_()
 
 if __name__ == "__main__":
-    try:
-        app = QApplication(sys.argv)
-        window = LANScanner()
-        window.show()
-        sys.exit(app.exec_())
-    except KeyboardInterrupt:
-        print("bye! thanks for using my LAN Scanner!")
-        print("if you liked it, please give it a star on github!")
-        print("https://github.com/hacker-mode/lan-scanner")
-        print("if you have any suggestions, please open an issue on github!")
-        print("https://github.com/hacker-mode/lan-scanner/issues")
-        sys.exit(0)
+    signal.signal(signal.SIGINT, signal_handler)
+    app = QApplication(sys.argv)
+    window = LANScanner()
+    window.show()
+    sys.exit(app.exec_())
